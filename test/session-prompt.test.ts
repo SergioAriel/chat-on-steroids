@@ -137,6 +137,28 @@ it('reads only the linked folder, refreshes its contents, and leaves unfiled cha
   expect(await prepareSessionPrompt('Removed', { projectId: project.id })).toContain('Selected project directory: /work/project');
 });
 
+it('adds the Core Bridge paragraph to the opening frame only while the bridge is switched on', async () => {
+  const { currentCoreInstructions } = await import('../src/main/mcp/instructions.js');
+  const { CORE_BRIDGE_INSTRUCTIONS } = await import('../src/shared/core-bridge.js');
+  const core = await currentCoreInstructions();
+
+  // Off by default: the frame is exactly the normal Core instructions, and the server
+  // instructions an MCP client sees never mention the fallback.
+  const off = await prepareSessionPrompt('Work here');
+  expect(off).toBe(prependUserPrompt('Work here', core));
+  expect(off).not.toContain('Local Core Bridge');
+  expect(await currentCoreInstructions()).toBe(core);
+
+  await saveConfig({ ...defaultConfig(), roots: [{ name: 'work', path: directory }], coreBridge: { enabled: true, allowActions: true } });
+  const on = await prepareSessionPrompt('Work here');
+  expect(on).toContain(CORE_BRIDGE_INSTRUCTIONS);
+  // A supplement, never a replacement: the complete normal Core instructions still lead it.
+  expect(on.indexOf(core)).toBeLessThan(on.indexOf(CORE_BRIDGE_INSTRUCTIONS));
+  expect(on).toContain('Local Core Bridge is available');
+  expect(userPromptText(on)).toBe('Work here');
+  expect(await currentCoreInstructions()).toBe(core);
+});
+
 it('uses durable session ownership through resume and worker inheritance, never an unrelated selected project', async () => {
   await fs.mkdir(path.join(directory, 'one')); await fs.mkdir(path.join(directory, 'two'));
   const one = await addProject(path.join(directory, 'one')), two = await addProject(path.join(directory, 'two'));

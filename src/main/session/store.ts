@@ -1028,15 +1028,20 @@ function applyToSummary(summary: SessionSummary, event: SessionEvent): void {
   if (event.kind === 'user_message') summary.userMessages += 1;
   if (event.kind === 'tool_call') {
     summary.toolCalls += 1;
-    const priorToolAt = summary.lastToolCallAt ?? 0;
-    summary.lastToolCallAt = Math.max(priorToolAt, event.time);
-    // Attribution repair can append an older call after newer activity. Keep the projection
-    // aligned with lastToolCallAt rather than letting append order make an old action look latest.
-    if (event.time >= priorToolAt) {
-      summary.lastToolActivity = {
-        kind: event.call.summary.kind,
-        title: event.call.summary.title.slice(0, 200)
-      };
+    // A Core Bridge row is the app's own answer to the chat's final, not chat-driven work:
+    // it runs after that final by construction, so moving the work clock to it would make
+    // the turn fences (settled completion, thinking-failed release) distrust their own end.
+    if (event.call.attribution !== 'core_bridge') {
+      const priorToolAt = summary.lastToolCallAt ?? 0;
+      summary.lastToolCallAt = Math.max(priorToolAt, event.time);
+      // Attribution repair can append an older call after newer activity. Keep the projection
+      // aligned with lastToolCallAt rather than letting append order make an old action look latest.
+      if (event.time >= priorToolAt) {
+        summary.lastToolActivity = {
+          kind: event.call.summary.kind,
+          title: event.call.summary.title.slice(0, 200)
+        };
+      }
     }
     if (event.call.endsActivity === true) {
       summary.lastFinishReportAt = Math.max(summary.lastFinishReportAt ?? 0, event.time);
@@ -1828,6 +1833,9 @@ export async function readCompletedFinal(sessionId: string, conversationId: stri
   if (recent.some(event => {
     if (event === final || workSequence(event) <= seq) return false;
     if (event.kind === 'tool_call') {
+      // The Core Bridge's own execution belongs to the final that requested it; it is
+      // the answer being prepared, never fresh chat work that would unsettle this final.
+      if (event.call.attribution === 'core_bridge') return false;
       if (event.time <= completedAt) return false;
       // A public native final settles its request even when Pro delivers another
       // connector call afterwards. Require proof recorded BEFORE that final; a new

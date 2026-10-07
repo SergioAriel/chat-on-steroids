@@ -372,6 +372,16 @@ export interface ControlApiSettings {
   allowActions: boolean;
 }
 
+/**
+ * The opt-in text-protocol fallback for the existing Core tools (`src/main/core-bridge.ts`).
+ * Read-only operations use only the permissions Workspace already grants; patching and
+ * terminal calls additionally need `allowActions`, which never survives `enabled` being off.
+ */
+export interface CoreBridgeSettings {
+  enabled: boolean;
+  allowActions: boolean;
+}
+
 export interface Config {
   /**
    * Names this computer's connectors in ChatGPT, for one ChatGPT account used on several
@@ -393,6 +403,7 @@ export interface Config {
   goal: GoalSettings;
   mcp: McpSettings;
   controlApi: ControlApiSettings;
+  coreBridge: CoreBridgeSettings;
 }
 
 export type ConnectionState =

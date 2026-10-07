@@ -63,7 +63,8 @@ const entrySchema = inputArgs.extend({
   toolImages: inputArgs.shape.images,
   /** One after-turn pickup earned by confirmed silence or settled Thinking failed. */
   silenceBoundary: z.object({ turnId: z.string().min(1).max(256), conversationId: z.string().min(1).max(256), workSeq: z.number().int().nonnegative(), acceptedAt: z.number().nonnegative().optional(), listenUntil: z.number().nonnegative().optional(), nativeBusy: z.boolean().optional() }).optional(),
-  /** The active turn at admission; its final may already be waiting in the browser journal. */
+  /** The turn this row waits for: the active turn at admission, or the exact source turn a
+    * generated reply (a Core Bridge result) answers; its final may already be recorded. */
   queuedTurn: z.object({ conversationId: z.string().min(1).max(256), turnId: z.string().min(1).max(256) }).optional(),
   /** Shared unfinished-response fallback belongs to this question in every mode. */
   recovery: z.object({ questionId: z.string(), episode: z.string().max(200).optional(), pro: z.boolean(), busyUntil: z.number(), phase: z.enum(['ready', 'stopping', 'reloading', 'resumed']), reloadOwner: z.string().optional(),
@@ -694,7 +695,7 @@ async function materializeOpening(entry: InputEntry): Promise<void> {
     throw new Error('Reserved opening session belongs to another ChatGPT conversation');
   if (entry.projectId && session.projectId !== entry.projectId) await assignSessionProject(session.id, entry.projectId);
 }
-export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwner']): Promise<InputEntry> {
+export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwner'], waitFor?: { conversationId: string; turnId: string }): Promise<InputEntry> {
   return serial(async () => {
     const input = inputArgs.parse(raw);
     if (input.stages !== undefined && JSON.stringify([input.text, ...input.stages]).length > 12000)
@@ -710,7 +711,17 @@ export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwn
     // Explicit injection has its own recipient and can never spend a browser completion.
     const activity = requestedSession && input.delivery !== 'tool' && input.attachmentDelivery !== 'tool'
       ? deliveryHooks?.activity?.(requestedSession) : null;
-    const sourceTurn = requestedSession?.activeTurnId ?? (activity?.exact ? activity.turnId : null);
+    // A generated reply that answers an exact completed turn (the Core Bridge result)
+    // names that turn explicitly. That ownership proof is authoritative, not a hint: if
+    // this local session moved to another conversation while the work was running, falling
+    // back to the new chat's active turn would deliver the old chat's result to the wrong
+    // conversation. Refuse the admission instead.
+    if (waitFor && (!requestedSession || requestedSession.conversationId !== waitFor.conversationId)) {
+      throw new Error('The source conversation changed before this generated reply could be queued');
+    }
+    const sourceTurn = waitFor
+      ? waitFor.turnId
+      : requestedSession?.activeTurnId ?? (activity?.exact ? activity.turnId : null);
     const queuedTurn = requestedSession?.conversationId && sourceTurn
       ? { conversationId: requestedSession.conversationId, turnId: sourceTurn } : undefined;
     let policy = input.sessionId ? await sessionInputPolicy(input.sessionId) : null;

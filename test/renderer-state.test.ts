@@ -2050,7 +2050,7 @@ it('keeps the app-wide options on the General page, not in Setup, and saves them
   const doc = mounted.window.document;
   const general = doc.querySelector('[data-panel="general"]')!;
   const setup = doc.querySelector('[data-panel="setup"]')!;
-  for (const id of ['followOutput', 'playfulStatus', 'mentionCore', 'privacyScreenshots', 'developerMode', 'controlApiEnabled', 'controlApiAllowActions']) {
+  for (const id of ['followOutput', 'playfulStatus', 'mentionCore', 'privacyScreenshots', 'developerMode', 'controlApiEnabled', 'controlApiAllowActions', 'coreBridgeEnabled', 'coreBridgeAllowActions']) {
     expect(general.contains(doc.getElementById(id)), id).toBe(true);
     expect(setup.contains(doc.getElementById(id)), id).toBe(false);
   }
@@ -2059,6 +2059,8 @@ it('keeps the app-wide options on the General page, not in Setup, and saves them
   expect(doc.querySelector('#tabs [data-tab="general"]')!.classList.contains('is-sel')).toBe(true);
   // Allow actions needs the control API first.
   expect(doc.getElementById('controlApiAllowActions')!.hasAttribute('disabled')).toBe(true);
+  // Bridge actions follow the same parent-switch rule.
+  expect(doc.getElementById('coreBridgeAllowActions')!.hasAttribute('disabled')).toBe(true);
   const follow = doc.getElementById('followOutput') as HTMLInputElement;
   expect(follow.checked).toBe(true);
   follow.checked = false;

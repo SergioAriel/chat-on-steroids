@@ -513,6 +513,19 @@ it.each(['after-turn', 'finish'] as const)('does not release %s queued after the
   } finally { clock.mockRestore(); }
 });
 
+it('refuses an explicit source-turn reply after its session moved to another conversation', async () => {
+  const fromConversationId = randomUUID();
+  const toConversationId = randomUUID();
+  const turnId = randomUUID();
+  const session = await createSession({ title: 'Generated reply owner', conversationId: fromConversationId });
+  const outbound = { ...message(session.id, 'off'), mode: 'after-turn' as const };
+
+  expect(await rebindSession(session.id, fromConversationId, toConversationId)).toBe(true);
+  await expect(input.enqueueInput(outbound, undefined, { conversationId: fromConversationId, turnId }))
+    .rejects.toThrow('The source conversation changed before this generated reply could be queued');
+  expect((await input.listInputs()).some(row => row.id === outbound.id)).toBe(false);
+});
+
 it('does not pin an idle chat to tool transport because another call is unattributed', async () => {
   const { trackInFlight, emptyEvidence } = await import('../src/main/mcp/call-context.js');
   const conversationId = randomUUID();

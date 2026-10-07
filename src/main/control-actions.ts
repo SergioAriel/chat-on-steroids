@@ -1,16 +1,28 @@
 import { z } from 'zod';
-import type { ControlApiCancelResult, ControlApiSendResult } from '../shared/control-api.js';
+import type {
+  ControlApiCancelResult,
+  ControlApiOpenCodeCancel,
+  ControlApiOpenCodeJobCreated,
+  ControlApiSendResult
+} from '../shared/control-api.js';
 import { getConfig } from './config.js';
 import { projectInput, RequestError } from './control-reads.js';
 import { logInfo } from './logger.js';
+import {
+  cancelOpenCodeJob,
+  OpenCodeJobError,
+  projectOpenCodeJob,
+  startOpenCodeJob,
+  type OpenCodeJobPermits
+} from './opencode.js';
 import { deliveryProof, listInputs, sessionInputPolicy } from './session/input.js';
 import type { InputArgs, InputEntry } from './session/input.js';
 import { readSession } from './session/read-model.js';
 import { cancelDesktopInput, sendDesktopInput } from './session/start-input.js';
 
 /**
- * The action routes of the local control API: send a message to an existing chat, and cancel
- * one that has not been handed over.
+ * The action routes of the local control API: send a message to an existing chat, cancel
+ * one that has not been handed over, and run or cancel an OpenCode job for a session.
  *
  * There is no new send path. A message goes through `sendDesktopInput`, the same entry the
  * composer uses, and is cancelled through `cancelDesktopInput`; the outbox stays the only owner
@@ -18,6 +30,11 @@ import { cancelDesktopInput, sendDesktopInput } from './session/start-input.js';
  * id, so repeating it returns the row that already exists instead of sending again. What a row
  * proves about delivery comes from `deliveryProof`, never from time, text or a turn range, and a
  * row that may have reached ChatGPT is reported as unconfirmed and is never resent.
+ *
+ * An OpenCode job is admitted the same way the executor admits it for any caller: the session
+ * exists and is not a worker or helper chat, the folder is inside the approved roots, the task
+ * is plain text, and both switches are on. The job's result returns through the outbox too; this
+ * module never sends anything itself.
  *
  * The listener decides whether actions are allowed at all and reads the request body; this
  * module only sees an authorized, size-checked, parsed request.
@@ -49,9 +66,28 @@ const cancelBody = z.object({}).strict();
 
 const CANCEL_ROUTE = /^\/v1\/inputs\/([0-9a-f-]{36})\/cancel$/;
 
+/**
+ * OpenCode model ids are provider slugs such as `openai/gpt-5.6`. The charset keeps a value
+ * from ever reading as a flag or a path; the executor rechecks it before the spawn.
+ */
+const OPENCODE_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,199}$/;
+
+const opencodeJobBody = z
+  .object({
+    id: lowerUuid.optional(),
+    sessionId: z.string().regex(/^[0-9a-z-]{8,64}$/),
+    cwd: z.string().trim().min(1).max(1024),
+    task: z.string().min(1).max(16_000),
+    model: z.string().trim().regex(OPENCODE_MODEL_ID).nullable().optional()
+  })
+  .strict();
+
+const OPENCODE_CANCEL_ROUTE = /^\/v1\/opencode\/jobs\/([0-9a-f-]{36})\/cancel$/;
+
 /** Every path an action can arrive on, whatever the id, so one gate can refuse them all alike. */
 export function isActionPath(route: string): boolean {
-  return route === '/v1/inputs' || /^\/v1\/inputs\/[^/]+\/cancel$/.test(route);
+  return route === '/v1/inputs' || /^\/v1\/inputs\/[^/]+\/cancel$/.test(route) ||
+    route === '/v1/opencode/jobs' || /^\/v1\/opencode\/jobs\/[^/]+\/cancel$/.test(route);
 }
 
 export interface ActionReply {
@@ -198,5 +234,65 @@ export async function serveAction(method: string, route: string, body: unknown):
   if (route === '/v1/inputs') return send(body);
   const match = CANCEL_ROUTE.exec(route);
   if (match) return cancel(match[1]!, body);
+  if (route === '/v1/opencode/jobs') return opencodeCreate(body);
+  const opencode = OPENCODE_CANCEL_ROUTE.exec(route);
+  if (opencode) return opencodeCancel(opencode[1]!, body);
   return undefined;
+}
+
+// ------------------------------------------------------------- OpenCode jobs
+
+/** What an executor refusal answers on the wire. Everything else is a bare 500, like `send`. */
+function opencodeRefusal(error: OpenCodeJobError): RequestError {
+  const table: Record<string, [number, string]> = {
+    shutting_down: [503, 'shutting_down'],
+    session_not_found: [404, 'session_not_found'],
+    session_not_controllable: [409, 'session_not_controllable'],
+    no_chat: [409, 'no_chat'],
+    cwd_refused: [400, 'cwd_refused'],
+    task_refused: [400, 'task_refused'],
+    model_refused: [400, 'model_refused'],
+    id_conflict: [409, 'id_conflict'],
+    too_many_jobs: [503, 'busy'],
+    job_not_found: [404, 'job_not_found'],
+    actions_disabled: [403, 'actions_disabled']
+  };
+  const mapped = table[error.code];
+  if (mapped) return new RequestError(mapped[0], mapped[1], error.detail);
+  return new RequestError(500, 'internal_error');
+}
+
+const permits = (): OpenCodeJobPermits => ({ permitted: () => actionsAllowed() });
+
+async function opencodeCreate(rawBody: unknown): Promise<ActionReply> {
+  const body = parse(opencodeJobBody, rawBody);
+  if (!actionsAllowed()) throw new RequestError(403, 'actions_disabled');
+  try {
+    const { job, replayed } = await startOpenCodeJob({
+      id: body.id,
+      sessionId: body.sessionId,
+      cwd: body.cwd,
+      task: body.task,
+      model: body.model ?? null
+    }, permits());
+    const reply: ControlApiOpenCodeJobCreated = { job: projectOpenCodeJob(job), replayed };
+    // Started, not finished: the result is read from the job and the outbox row it names.
+    return { status: replayed ? 200 : 202, body: reply };
+  } catch (error) {
+    if (error instanceof OpenCodeJobError) throw opencodeRefusal(error);
+    throw error;
+  }
+}
+
+async function opencodeCancel(jobId: string, rawBody: unknown): Promise<ActionReply> {
+  parse(cancelBody, rawBody);
+  if (!actionsAllowed()) throw new RequestError(403, 'actions_disabled');
+  try {
+    const { job, cancelled } = await cancelOpenCodeJob(jobId, permits());
+    const reply: ControlApiOpenCodeCancel = { job: projectOpenCodeJob(job), cancelled };
+    return { status: 200, body: reply };
+  } catch (error) {
+    if (error instanceof OpenCodeJobError) throw opencodeRefusal(error);
+    throw error;
+  }
 }

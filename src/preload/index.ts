@@ -55,6 +55,8 @@ export interface SettingsPatch {
   mcp: Config['mcp'];
   /** Optional so callers that save other sections never have to carry it. */
   controlApi?: Config['controlApi'];
+  /** Optional on the same rule: the Core Bridge pair, for callers that edit it. */
+  coreBridge?: Config['coreBridge'];
   /** This computer's connector name suffix; omitted by callers that do not edit it. */
   connectorSuffix?: string;
 }

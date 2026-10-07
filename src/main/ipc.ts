@@ -251,6 +251,7 @@ const settingsPatch = z.object({
   }),
   mcp: z.object({ instructions: z.string().trim().max(MAX_MCP_INSTRUCTIONS_CHARS) }).strict().optional(),
   controlApi: z.object({ enabled: z.boolean(), allowActions: z.boolean().optional() }).strict().optional(),
+  coreBridge: z.object({ enabled: z.boolean(), allowActions: z.boolean().optional() }).strict().optional(),
   goal: z.object({
     impulseMinutes: z.number().int().min(0).max(60).optional(),
     includeToolCalls: z.boolean().optional(),
@@ -306,7 +307,7 @@ type SettingsSnapshot = z.infer<typeof settingsPatch>;
  * unchanged between `base` and `wanted` was not edited by this renderer save and therefore keeps
  * the current main-process value. A field that differs was deliberately edited here and wins.
  */
-function mergeSettings(current: Config, base: SettingsSnapshot, wanted: SettingsSnapshot): Omit<SettingsSnapshot, 'controlApi'> & { controlApi: Config['controlApi'] } {
+function mergeSettings(current: Config, base: SettingsSnapshot, wanted: SettingsSnapshot): Omit<SettingsSnapshot, 'controlApi' | 'coreBridge'> & { controlApi: Config['controlApi']; coreBridge: Config['coreBridge'] } {
   const tunnelEdited = (['tunnelId', 'desktopTunnelId', 'pluginsTunnelId'] as const)
     .some(key => (base.tunnel[key] ?? '') !== (wanted.tunnel[key] ?? ''));
   if (tunnelEdited && ((base.tunnel.profileId ?? 'default') !== (current.tunnel.profileId ?? 'default') ||
@@ -332,12 +333,23 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
       : pick(current.controlApi.allowActions, base.controlApi?.allowActions ?? false, wanted.controlApi.allowActions);
     controlApi = { enabled, allowActions: enabled && allowActions === true };
   }
+  // The Core Bridge pair merges on the same rule: enabling the bridge never silently widens
+  // its action guard, and disabling it always revokes the guard.
+  let coreBridge = current.coreBridge;
+  if (wanted.coreBridge) {
+    const enabled = pick(current.coreBridge.enabled, base.coreBridge?.enabled ?? false, wanted.coreBridge.enabled);
+    const allowActions = wanted.coreBridge.allowActions === undefined
+      ? current.coreBridge.allowActions
+      : pick(current.coreBridge.allowActions, base.coreBridge?.allowActions ?? false, wanted.coreBridge.allowActions);
+    coreBridge = { enabled, allowActions: enabled && allowActions === true };
+  }
   return {
     ...(wanted.connectorSuffix === undefined ? {} : {
       connectorSuffix: pick(current.connectorSuffix ?? '', base.connectorSuffix ?? '', wanted.connectorSuffix)
     }),
     mcp: wanted.mcp ? { instructions: pick(current.mcp.instructions, base.mcp?.instructions ?? '', wanted.mcp.instructions) } : current.mcp,
     controlApi,
+    coreBridge,
     capabilities,
     readOnly: pick(current.readOnly, base.readOnly, wanted.readOnly),
     commandAllowlist: {

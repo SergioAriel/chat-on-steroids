@@ -17,14 +17,20 @@ export const CONTROL_API_ROUTES = [
   '/v1/sessions/{id}/events',
   '/v1/inputs',
   '/v1/agents',
-  '/v1/log'
+  '/v1/log',
+  '/v1/opencode/jobs/{id}'
 ] as const;
 
 /**
  * Routes that change something. They are served only while the user has also switched on
  * `controlApi.allowActions`, and are listed apart from `CONTROL_API_ROUTES` for that reason.
  */
-export const CONTROL_API_ACTION_ROUTES = ['POST /v1/inputs', 'POST /v1/inputs/{id}/cancel'] as const;
+export const CONTROL_API_ACTION_ROUTES = [
+  'POST /v1/inputs',
+  'POST /v1/inputs/{id}/cancel',
+  'POST /v1/opencode/jobs',
+  'POST /v1/opencode/jobs/{id}/cancel'
+] as const;
 
 /** Written to `userData/control-api/endpoint.json` while the listener is up. */
 export interface ControlApiEndpoint {
@@ -372,5 +378,41 @@ export interface ControlApiSendResult {
 export interface ControlApiCancelResult {
   input: ControlApiInput;
   /** False when the row was already cancelled or failed. `input.delivery` says whether it may have been sent. */
+  cancelled: boolean;
+}
+
+/** One OpenCode job, as `src/main/opencode.ts` sees it. Jobs live in process memory only. */
+export interface ControlApiOpenCodeJob {
+  jobId: string;
+  /** The session that asked for the work; its conversation receives the result. */
+  sessionId: string;
+  /** `running`, `completed`, `failed` or `cancelled`. */
+  status: string;
+  /** The OS pid while the process runs; null once it has ended, never a stale pid. */
+  pid: number | null;
+  startedAt: number;
+  finishedAt: number | null;
+  exitCode: number | null;
+  /** The model the caller named, or null for OpenCode's own configured default. */
+  model: string | null;
+  /** The sandbox's virtual spelling of the working folder; the real path stays in the app. */
+  cwd: string;
+  stdout: ControlApiText;
+  stderr: ControlApiText;
+  /** The outbox row carrying the result, once it was admitted. */
+  resultInputId: string | null;
+  /** Why the result was not delivered, when it was not. */
+  resultError: string | null;
+}
+
+export interface ControlApiOpenCodeJobCreated {
+  job: ControlApiOpenCodeJob;
+  /** True when this id named a job that already exists, so nothing was spawned again. */
+  replayed: boolean;
+}
+
+export interface ControlApiOpenCodeCancel {
+  job: ControlApiOpenCodeJob;
+  /** False when the job had already ended on its own before the cancellation landed. */
   cancelled: boolean;
 }

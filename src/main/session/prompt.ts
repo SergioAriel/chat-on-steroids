@@ -4,6 +4,7 @@ import { effectiveCapabilities, getConfig } from '../config.js';
 import { currentCoreInstructions } from '../mcp/instructions.js';
 import { getSessionProject, projectWorkspace } from '../projects.js';
 import { resolvePath } from '../sandbox.js';
+import { CORE_BRIDGE_INSTRUCTIONS } from '../../shared/core-bridge.js';
 import { MAX_CHATGPT_MESSAGE_CHARS, prependUserPrompt } from '../../shared/user-prompt.js';
 import { selectedSkillInstructions, type SelectedSkill } from './skill-prompt.js';
 import { listSkillLibrary } from '../skill-library.js';
@@ -119,7 +120,10 @@ export async function prepareSessionPrompt(text: string, scope: PromptScope = {}
   // admission, so those Skills come from that catalog: only the selected body is read below. Every
   // other Skill the chat can use is still listed, exactly as without routing.
   const library = await listSkillLibrary(scope.autoSkills !== undefined ? { ...skillScope, managedFromCatalog: true } : skillScope);
-  const core = await currentCoreInstructions(library);
+  // The bridge paragraph is a supplement, never a replacement: it rides inside the same
+  // COS_CONTEXT frame as the complete Core instructions, and only while the fallback is on.
+  const core = await currentCoreInstructions(library) +
+    (getConfig().coreBridge.enabled === true ? `\n\n${CORE_BRIDGE_INSTRUCTIONS}` : '');
   const skills = await selectedSkillInstructions(authored, skillScope, library, scope.autoSkills);
   fitSessionPrompt(text, core, null, budget); // Only Core/task overflow is mandatory.
   const agents = await projectInstructions(scope);

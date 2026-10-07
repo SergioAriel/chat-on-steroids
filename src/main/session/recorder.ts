@@ -1175,6 +1175,11 @@ export interface ToolCallInput {
   sessionId?: string | null;
   /** A successful worker finish report is a hard activity boundary, not fresh work. */
   endsActivity?: boolean;
+  /**
+   * The first-class local transport that invoked this call, when it was not an MCP request.
+   * Recorded as the call's attribution grade so a local execution never reads as MCP traffic.
+   */
+  transport?: 'core_bridge';
 }
 
 /** A workflow orders its calls before identity resolves; a session orders their storage.
@@ -1223,7 +1228,9 @@ export function recordToolCall(input: ToolCallInput): Promise<ToolCallRecord | n
       sessionId:
         input.sessionId ??
         (correlation?.conversationId === input.conversationId ? correlation.sessionId : null),
-      attribution: 'request_id',
+      // A first-class local caller (the Core Bridge) is placed by the conversation it proved,
+      // never by a request id: nothing pretended to be an MCP call.
+      attribution: input.transport === 'core_bridge' ? 'core_bridge' : 'request_id',
       turnId: live?.turnId ?? null
     };
     if (input.bind) bindAgentConversation(input.bind, input.conversationId);
@@ -1420,11 +1427,13 @@ async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolC
       requestId: input.requestId ?? null,
       conversationId: target.conversationId,
       attributionMethod:
-        target.attribution === 'superseded'
-          ? 'superseded'
-          : target.conversationId && input.requestId
-            ? 'request_id'
-            : 'unattributed',
+        target.attribution === 'core_bridge'
+          ? 'core_bridge'
+          : target.attribution === 'superseded'
+            ? 'superseded'
+            : target.conversationId && input.requestId
+              ? 'request_id'
+              : 'unattributed',
       args: await storeText(sessionId, redactCredentialText(safeJson(redactArgs(input.tool, input.args))), MAX_TOOL_ARGS_CHARS),
       result: await storeText(sessionId, resultText, MAX_TOOL_RESULT_CHARS),
       outcome: input.outcome,
@@ -1438,7 +1447,8 @@ async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolC
     const recordCall = call.process ? recordProcessCall : appendEvent;
     await recordCall(sessionId, {
       time: input.startedAt,
-      source: 'mcp',
+      // A Core Bridge call is app-executed work in that chat, not MCP transport traffic.
+      source: input.transport === 'core_bridge' ? 'app' : 'mcp',
       kind: 'tool_call',
       call,
       ...(eventAgent ? { agent: eventAgent } : {}),
@@ -1655,6 +1665,35 @@ export function setCallAttributionListener(
 /** Set by the agent broker, for the deferred prime binding in recordToolCall. */
 export function setAgentBinder(bind: (agent: string, conversationId: string) => void): void {
   agentBinder = bind;
+}
+
+/**
+ * Set by the Core Bridge (`src/main/core-bridge.ts`), which owns what a chat's final answer
+ * may request from local tools. The recorder only reports the fact — one call per final
+ * answer it actually wrote, never for streaming text — and the listener owns every gate,
+ * dedupe and execution decision. Async and never awaited: bridge work must not hold the
+ * observation chain of the conversation it serves.
+ */
+export interface FinalAssistantMessage {
+  sessionId: string;
+  conversationId: string;
+  messageId: string;
+  /** The canonical turn this final belongs to; the bridge names it in its reply input. */
+  turnId: string | null;
+  text: string;
+}
+
+let finalAssistantListener: ((message: FinalAssistantMessage) => Promise<void>) | null = null;
+
+export function setFinalAssistantListener(listen: ((message: FinalAssistantMessage) => Promise<void>) | null): void {
+  finalAssistantListener = listen;
+}
+
+function noteFinalAssistant(message: FinalAssistantMessage): void {
+  if (!finalAssistantListener) return;
+  void finalAssistantListener(message).catch(error => {
+    logWarn(`Core Bridge final-answer handling failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
 }
 
 function bindAgentConversation(agent: string, conversationId: string): void {
@@ -2280,6 +2319,18 @@ async function recordChatObservationsNow(
           recoveredGoalSeen = true;
         }
         if (!written.changed) continue;
+        if (state === 'final' && written.event.kind === 'assistant_message' && written.event.messageId) {
+          // Only a final answer, only once per revision the store actually wrote: streaming
+          // text never reaches the listener, and an unchanged replay fires nothing. The
+          // bridge listener owns every gate; this is the observation, not the decision.
+          noteFinalAssistant({
+            sessionId,
+            conversationId,
+            messageId: written.event.messageId,
+            turnId: canonicalTurn ?? null,
+            text: item.text ?? ''
+          });
+        }
         if (state === 'final' && written.event.kind === 'assistant_message' && written.event.providerMessageId &&
             uncertainEnd?.kind === 'turn_end' && uncertainEnd.reason === 'thinking_failed' &&
             uncertainEnd.turnId === canonicalTurn && (written.event.finalContentSeq ?? written.event.seq) > uncertainEnd.seq &&

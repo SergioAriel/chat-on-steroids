@@ -206,6 +206,8 @@
                 <label class="setting"><span class="setting-text"><b>Developer mode</b><em>Show turn boundaries and recovery events in the chat.</em></span><input id="developerMode" type="checkbox" /></label>
                 <label class="setting"><span class="setting-text"><b>Local control API</b><em>Let agents on this computer read app status and chats.</em></span><input id="controlApiEnabled" type="checkbox" /></label>
                 <label class="setting"><span class="setting-text"><b>Allow actions</b><em>Let those agents also send and cancel messages. Needs the local control API.</em></span><input id="controlApiAllowActions" type="checkbox" disabled /></label>
+                <label class="setting"><span class="setting-text"><b>Local Core bridge</b><em>Allows ChatGPT conversations opened through CoS to request existing Core tools through the local companion when the MCP Core connector is unavailable.</em></span><input id="coreBridgeEnabled" type="checkbox" /></label>
+                <label class="setting"><span class="setting-text"><b>Allow bridge actions</b><em>Also let the bridge patch files and run terminal commands. Needs the Local Core bridge; every live permission still applies.</em></span><input id="coreBridgeAllowActions" type="checkbox" disabled /></label>
               </div>
             </section>
           </div>

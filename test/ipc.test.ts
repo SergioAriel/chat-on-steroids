@@ -1035,6 +1035,40 @@ describe('settings writes from more than one UI', () => {
       await controlApi.stopControlApi();
     }
   });
+  it('keeps Core Bridge actions behind the bridge switch and merges the pair independently', async () => {
+    const base = defaultConfig(); await saveConfig(base);
+    // Actions cannot be granted while the bridge itself is off.
+    expect((await save({ ...base, coreBridge: { enabled: false, allowActions: true } }, base)).ok).toBe(true);
+    expect(getConfig().coreBridge).toEqual({ enabled: false, allowActions: false });
+
+    const off = getConfig();
+    expect((await save({ ...off, coreBridge: { enabled: true, allowActions: true } }, off)).ok).toBe(true);
+    expect(getConfig().coreBridge).toEqual({ enabled: true, allowActions: true });
+
+    // A form from a build with no action field, and a stale form that never edited the field,
+    // must preserve a newer grant instead of revoking it accidentally.
+    const granted = getConfig();
+    expect((await save({ ...granted, coreBridge: { enabled: true } }, granted)).ok).toBe(true);
+    expect(getConfig().coreBridge.allowActions).toBe(true);
+    const stale = { ...granted, coreBridge: { enabled: true, allowActions: false } };
+    expect((await save(stale, stale)).ok).toBe(true);
+    expect(getConfig().coreBridge.allowActions).toBe(true);
+
+    // Turning the bridge off revokes actions; switching it back on never resurrects them.
+    const running = getConfig();
+    expect((await save({ ...running, coreBridge: { enabled: false, allowActions: true } }, running)).ok).toBe(true);
+    expect(getConfig().coreBridge).toEqual({ enabled: false, allowActions: false });
+    const stopped = getConfig();
+    expect((await save({ ...stopped, coreBridge: { enabled: true } }, stopped)).ok).toBe(true);
+    expect(getConfig().coreBridge).toEqual({ enabled: true, allowActions: false });
+
+    // The action grant can also be withdrawn without switching the bridge off.
+    const again = getConfig();
+    expect((await save({ ...again, coreBridge: { enabled: true, allowActions: true } }, again)).ok).toBe(true);
+    const withdraw = getConfig();
+    expect((await save({ ...withdraw, coreBridge: { enabled: true, allowActions: false } }, withdraw)).ok).toBe(true);
+    expect(getConfig().coreBridge).toEqual({ enabled: true, allowActions: false });
+  });
   it('saves helper settings and tab retention through the renderer schema and merge boundary', async () => {
     const base = defaultConfig();
     await saveConfig(base);

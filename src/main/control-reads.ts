@@ -21,6 +21,7 @@ import { swarmState } from './agents.js';
 import { sessionControlsFor } from './bridge.js';
 import type { SessionControlsView } from './bridge.js';
 import { getLog, logWarn } from './logger.js';
+import { openCodeJobView } from './opencode.js';
 import { redactSecretText } from './redaction.js';
 import { deliveryProof, listInputs } from './session/input.js';
 import type { InputEntry } from './session/input.js';
@@ -508,6 +509,8 @@ function activityLog(params: URLSearchParams): ControlApiLog {
 // ---------------------------------------------------------------- routes
 
 const SESSION_ROUTE = /^\/v1\/sessions\/([0-9a-z-]{8,64})(\/events)?$/;
+/** A job id is a generated lowercase UUID, matched only in that spelling (see `SESSION_ROUTE`). */
+const OPENCODE_JOB_ROUTE = /^\/v1\/opencode\/jobs\/([0-9a-f-]{36})$/;
 
 /**
  * Undefined when the path is not one of these routes. Ids are generated lowercase, and a
@@ -524,5 +527,13 @@ export async function serveRead(route: string, params: URLSearchParams): Promise
   if (route === '/v1/log') return activityLog(params);
   const session = SESSION_ROUTE.exec(route);
   if (session) return session[2] ? sessionEvents(session[1]!, params) : sessionDetail(session[1]!, params);
+  const job = OPENCODE_JOB_ROUTE.exec(route);
+  if (job) {
+    parseQuery(params, {});
+    // A projection of the registry the executor owns; the job may be gone with a restart.
+    const view = openCodeJobView(job[1]!);
+    if (!view) throw new RequestError(404, 'job_not_found');
+    return { job: view };
+  }
   return undefined;
 }

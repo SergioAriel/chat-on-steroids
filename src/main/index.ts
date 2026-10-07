@@ -29,6 +29,8 @@ import { initSecretsPath } from './secrets.js';
 import { mainText, mainTextTranslations, onMainTextsChange, restoreMainTextTranslations } from './main-texts.js';
 import { isMainText } from '../shared/main-texts.js';
 import { executableFingerprint, initKeychainNotice } from './keychain-notice.js';
+import { installCoreBridge } from './core-bridge.js';
+import { stopOpenCodeRuntime } from './opencode.js';
 import { pluginManager } from './plugins/manager.js';
 import { setBrowserOpener, setBrowserWorkArea, shutdownBridge, startBridge } from './bridge.js';
 import { setStuckNotifier } from './stuck-notice.js';
@@ -456,6 +458,11 @@ void app.whenReady().then(async () => {
   // The prime's chat is the user's own, so no extension report can name it. It is bound
   // when the recorder manages to place the prime's first call. See recordToolCall.
   setAgentBinder(bindConversation);
+  // The Core Bridge reads live settings per final answer, so it is installed once here
+  // whatever the current switch says: flipping it on in Settings needs no restart. Its
+  // durable request ledger also needs the store above, and observation batches only start
+  // arriving once the browser bridge listens, later than this.
+  installCoreBridge();
   // Before anything can call an agent tool, and before a run is restored: the broker
   // decides whether a previous run has been abandoned partly from which ChatGPT tabs are
   // open, and without this it can only answer "I cannot see" — which it treats, on
@@ -644,7 +651,7 @@ app.on('will-quit', (event) => {
       {
         name: 'process cleanup',
         budgetMs: 15_000,
-        run: () => [unifiedExecManager.terminateAllProcesses(), stopComputerHelper(), shutdownPetOverlay(), pluginManager.close(),
+        run: () => [unifiedExecManager.terminateAllProcesses(), stopOpenCodeRuntime(), stopComputerHelper(), shutdownPetOverlay(), pluginManager.close(),
           Promise.resolve().then(() => loadedCosBrowser()?.stop())]
       },
       // Phase 3: recorder work can enqueue both session projections and named durable state.

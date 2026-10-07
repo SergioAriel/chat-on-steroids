@@ -275,6 +275,8 @@ export const MAX_MCP_INSTRUCTIONS_CHARS = 4000;
 const DEFAULT_MCP = { instructions: '' } as const;
 /** Off for fresh installs and for every config written before the switches existed. */
 const DEFAULT_CONTROL_API = { enabled: false, allowActions: false } as const;
+/** Same shape and same rule: the text fallback is off until the user switches it on, and its action guard never outlives it. */
+const DEFAULT_CORE_BRIDGE = { enabled: false, allowActions: false } as const;
 const DEFAULT_COMMAND_ALLOWLIST = { enabled: false, mode: 'allow', rules: [] } as const;
 const commandAllowlistRuleSchema = z.string().max(MAX_COMMAND_ALLOWLIST_RULE_CHARS).superRefine((rule, ctx) => {
   const message = validateCommandAllowlistRule(rule);
@@ -527,7 +529,19 @@ const configSchema = z.object({
     .transform((value) => ({ enabled: value.enabled, allowActions: value.enabled && value.allowActions }))
     .optional()
     .default({ ...DEFAULT_CONTROL_API })
-    .catch({ ...DEFAULT_CONTROL_API })
+    .catch({ ...DEFAULT_CONTROL_API }),
+  // The Core Bridge fallback repairs field-wise like the control API: one bad value must not
+  // send every root and permission through conservative recovery, and a hand-edited
+  // `{ enabled: false, allowActions: true }` loads as off.
+  coreBridge: z
+    .object({
+      enabled: z.boolean().optional().default(DEFAULT_CORE_BRIDGE.enabled).catch(DEFAULT_CORE_BRIDGE.enabled),
+      allowActions: z.boolean().optional().default(DEFAULT_CORE_BRIDGE.allowActions).catch(DEFAULT_CORE_BRIDGE.allowActions)
+    })
+    .transform((value) => ({ enabled: value.enabled, allowActions: value.enabled && value.allowActions }))
+    .optional()
+    .default({ ...DEFAULT_CORE_BRIDGE })
+    .catch({ ...DEFAULT_CORE_BRIDGE })
 });
 
 /**
@@ -559,7 +573,8 @@ export function defaultConfig(platform: NodeJS.Platform = process.platform, rele
     multiAgent: { ...FIRST_LAUNCH_MULTI_AGENT },
     goal: { ...DEFAULT_GOAL },
     mcp: { ...DEFAULT_MCP },
-    controlApi: { ...DEFAULT_CONTROL_API }
+    controlApi: { ...DEFAULT_CONTROL_API },
+    coreBridge: { ...DEFAULT_CORE_BRIDGE }
   };
 }
 

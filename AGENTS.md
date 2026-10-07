@@ -207,6 +207,7 @@ define the tool/config/wire contract. README and worklogs are secondary and can 
 | Desktop | Windows on; macOS retains its off default and separate native OS consent; Linux supports extension browser control. | Existing screen/control grants also govern browser tools; unsupported native clipboard remains masked. No new per-tab permission dialog. |
 | Shell/UI | Dark theme, minimize to tray, no automatic connector connection/login startup by default. | Optional browser/finish/plan choices are resolved by current config and their consumer, not invented from absent fields. |
 | Command policy | Off, in Allowlist mode, with no rules. | Missing legacy settings stay Off; a missing mode defaults to Allowlist. Rules and mode persist while Off. An enabled empty Allowlist rejects every launch; an enabled empty Denylist permits simple supported commands. |
+| Core Bridge | Off, action guard Off. | The text-protocol fallback for existing Core tools (§6). Both fields repair on their own like the control API pair; `allowActions` never survives `enabled` being off, and no bridge traffic exists while off. |
 | Plugin auto-refresh | Off. | Local status/discovery never claims ChatGPT refreshed its connector snapshot. |
 | Browser bridge port | Auto. | `ui.browserBridgePort` accepts Auto or 8765–8769. Effective `CLF_BRIDGE_PORTS` overrides it and disables the Settings control. |
 | Background chats | On. | Omitted legacy settings use On; explicit saved On/Off remains exact. Cold Windows startup requests a minimized browser window. |
@@ -226,8 +227,9 @@ Paths in this section are repository-relative. Most mechanisms have `main`, `sha
 | App shell | `src/main/index.ts`, `window-lifecycle.ts`, `window-layout.ts`, `window-icon.ts`, `tray-image.ts`, `shutdown.ts`: bootstrap, activation, geometry, tray and bounded exit. |
 | Config/security | `src/main/config.ts`, `platform.ts`, `secrets.ts`, `sandbox.ts`, `redaction.ts`; `src/shared/types.ts`, `capabilities.ts`: permission and host projection, secrets, approved paths. |
 | Publication | `src/main/connection.ts`, `mcp/server.ts`, `mcp/surfaces.ts`, `tunnel/{index,health,locate}.ts`, `diagnostics.ts`: endpoint/tunnel generation and truthful status. |
-| Local control API | `src/main/control-api.ts`, `src/main/control-reads.ts`, `src/main/control-actions.ts`, `src/shared/control-api.ts`: opt-in loopback listener, per-launch token, allowlisted read-only projections of other owners, and (behind `controlApi.allowActions`) send and cancel through the outbox. Owns no fact. The session list and event page it serves come from `session/read-model.ts`, the same functions the renderer's IPC handlers call. |
+| Local control API | `src/main/control-api.ts`, `src/main/control-reads.ts`, `src/main/control-actions.ts`, `src/shared/control-api.ts`, `src/main/opencode.ts`, `src/shared/local-task.ts`: opt-in loopback listener, per-launch token, allowlisted read-only projections of other owners, and (behind `controlApi.allowActions`) send, cancel and OpenCode jobs. Owns no fact; the OpenCode registry owns its process-memory jobs, and the session list and event page it serves come from `session/read-model.ts`, the same functions the renderer's IPC handlers call. |
 | Tool dispatch | `src/main/mcp/{tools,kernel,inbound,call-context,tool-declarations}.ts`, `tools-core.ts`, `tools-desktop.ts`, `tools-plugins.ts`: declarations, exact caller, live guards and evidence. |
+| Core Bridge | `src/main/core-bridge.ts`, `src/shared/core-bridge.ts`: opt-in text-protocol fallback that executes existing Core tools for a conversation whose final answer carries one `<COS_CORE_CALL>` block, through the real kernel (`invokeLocal`) and back as a new outbox input (`<COS_CORE_RESULT>`). The recorder's final-answer listener and the durable executed-request ledger are the only new facts; no tool logic is duplicated. |
 | Code composition | `src/main/mcp/code-mode-{tool,runtime,worker}.ts`: surface-scoped `exec`, QuickJS admission, limits and explicit emissions. |
 | Instructions/plan | `src/main/mcp/{instructions,coding-instructions,plan-tool}.ts`, `src/shared/agent-plan.ts`, `src/renderer/agent-plan.ts`: executor contract and displayed progress plan. |
 | Local files/processes | `src/main/{rawfs,fsops,search,ripgrep,env,toolchain,exec,exec-hints,text-match,diffstat}.ts`, `src/main/codex/*`, `src/shared/background-exec.ts`: bounded filesystem/shell implementation and the read-only renderer projection of live exec children. |
@@ -426,6 +428,63 @@ recording and token accounting keep the complete delivered text. `userMessageSou
 native source text; rendered Markdown whitespace alone cannot prove a send. Local and native prompt
 presentation, including worker messages without outbox receipts, ignores provider-added whitespace before the frame, then validates its exact
 internal length and closing boundary; authored whitespace after the frame remains intact.
+
+### Core Bridge: the text-protocol fallback for existing Core tools
+
+**Intent:** when a conversation cannot reach the MCP Core connector at all, it can still run
+the *existing* Core tools through an explicit text protocol carried by the ordinary
+conversation. This is a fallback transport, never a second implementation: no filesystem,
+sandbox, command or permission logic exists outside the canonical owners, and the MCP Core
+connector remains canonical wherever it is available.
+
+`src/shared/core-bridge.ts` owns the protocol. A request is exactly one complete
+`<COS_CORE_CALL>` JSON block — `{"id":"<uuid>","calls":[{"tool":"read","args":{…}}]}` — with
+at most 8 calls and a bounded body; results are `<COS_CORE_RESULT>` frames (`id`, `status`
+`completed`/`rejected`, per-call `ok`/`content`/`error`, omission counts). A
+`<COS_CORE_RESULT>` can never parse as a request: the parser matches only the call's own
+opening tag, and a message carrying result markers, a second call block or markers inside the
+block body is rejected as invalid rather than guessed at. Images do not cross the text
+channel and are named as omitted, never silently dropped.
+
+`src/main/core-bridge.ts` owns the decisions and the executed-request ledger. Detection is
+the recorder's final-answer listener: one event per final `assistant_message` the store
+actually wrote — streaming partials, unchanged replays, user messages and tool results never
+reach it, so nothing in them can execute. Gates, read live per answer: the `coreBridge.enabled`
+switch; the session's own current conversation; worker/helper origins stay unsupported; then
+the durable `core-bridge-requests` ledger is reserved *before* execution, so a crash or a
+replayed observation can lose one request but can never re-run a batch that may have applied
+a patch or started a command. A repeat UUID is ignored; an invalid block is answered once per
+message identity with a rejected result so the model is not left waiting. Batches for one
+session run sequentially.
+
+Execution reuses the real kernel. Each batch builds a fresh
+`createRegistrar(null, withManagedSkills(live ToolContext), 'core')` + `registerCoreTools`
+and invokes through the first-class `invokeLocal` entry: a top-level `dispatch` whose caller
+is seeded with the exact originating session/conversation and the `core_bridge` transport,
+never nested and never pretending to be an MCP request. Every dispatcher guard — schema
+validation, live capabilities, approved roots and symlink checks, Read-only, the command
+launch policy, output caps, block/compaction/supersession — applies unchanged, and the
+recorded rows carry attribution `core_bridge` (placement `core_bridge`, event source `app`)
+without counting as connector use. The bridge offers only
+`read`, `view_image`, `save_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`;
+the MCP-turn lifecycle tools (`agents`, `session_finish`, `update_plan`) and code-mode `exec`
+are refused by name, and unknown or Desktop/Plugins names answer the surface's own
+unknown-tool refusal. `apply_patch`, `exec_command` and `write_stdin` additionally need
+`coreBridge.allowActions`, the bridge's own explicit action guard (default off, repaired off
+while the bridge is off); read-only operations use only the permissions Workspace already
+grants and widen nothing.
+
+The result is a new outbox input (`mode:'after-turn'`, `authoredSource:'none'`) to the
+originating session — the OpenCode bridge's lesson: never inject into an assistant turn that
+has already ended. Delivery, its guarantees and Compact & Resume followship belong to the
+existing outbox; there is no retry timer, and a delivery failure leaves the work recorded and
+the answer unqueued. The row names the exact turn it answers (the existing `queuedTurn`
+reference), because that turn's completion is already recorded by the time the batch ran —
+without it the later-completion rule parks the answer until an unrelated next turn finishes. Opening prompts add the bounded bridge paragraph
+(`CORE_BRIDGE_INSTRUCTIONS`) inside the existing `COS_CONTEXT` frame only while the bridge is
+enabled — a supplement to the complete Core instructions, never a replacement — and MCP
+initialize instructions never mention it. Tests: `test/core-bridge.test.ts`,
+`test/session-prompt.test.ts`.
 
 ### Text Skills
 
@@ -1612,6 +1671,13 @@ Unattributed is a first-class recorded state. Late exact proof repairs only matc
 to the proved session epoch, copying assets first and rewriting only the scanned source prefix
 while retaining concurrent appends. Restore/repair uses the uncapped catalog and a bounded
 derived bucket cache. A superseded-source refusal remains terminally isolated from live B.
+Core Bridge rows are the one attribution grade that is not transport traffic: `core_bridge`
+placement on the exact originating session, event source `app`, no request id, and excluded
+from every "this chat made an MCP call" join, so bridge execution grants no silence/Goal
+recovery authority. They likewise never move the chat's work clock (`lastToolCallAt`) and
+never count as fresh work against the completed-final check: batch execution runs *after*
+the final that asked for it, so treating it as new work would unsettle that very final and
+park the bridge result's own delivery.
 
 Native tab closure does not synthesize a completed turn. Reload recovery can close a durable
 open turn only from an exact final for that turn, using the canonical message's stored owner
@@ -3875,8 +3941,9 @@ Local and public URLs, tunnel ids and plugin sources/config never appear; free t
 one per read, cleared when the request is answered.
 
 The read routes (`control-reads.ts`) are `GET /v1/sessions`, `/v1/sessions/{id}`,
-`/v1/sessions/{id}/events`, `/v1/inputs`, `/v1/agents` and `/v1/log`. Each asks the owner that
-already feeds the renderer (`session/read-model.ts`, `listInputs`, `swarmState`, `getLog`) and
+`/v1/sessions/{id}/events`, `/v1/inputs`, `/v1/agents`, `/v1/log` and `/v1/opencode/jobs/{id}`. Each
+asks the owner that already feeds the renderer (`session/read-model.ts`, `listInputs`,
+`swarmState`, `getLog`; the job detail asks the OpenCode registry below) and
 projects the answer through an allowlist, so a field an owner grows later stays private until
 it is named there. `/v1/agents` mirrors the broker's `retainedHistory` boolean so a watcher can
 distinguish parked worker history from no retained history; it does not expose dormant family
@@ -3920,8 +3987,9 @@ null instead of describing a different chat than `session`. Start and stop are s
 settings change starts or stops it only when the switch changes. Shutdown stops it in the
 admission/drain phase and does not let a late save reopen it.
 
-The action routes (`control-actions.ts`) are `POST /v1/inputs` (send a message to an existing chat)
-and `POST /v1/inputs/{id}/cancel`. They need a second switch, `controlApi.allowActions`, off by
+The action routes (`control-actions.ts`) are `POST /v1/inputs` (send a message to an existing chat),
+`POST /v1/inputs/{id}/cancel`, `POST /v1/opencode/jobs` and `POST /v1/opencode/jobs/{id}/cancel`.
+They need a second switch, `controlApi.allowActions`, off by
 default, which never outlives `enabled`: the config schema enforces it on load and on every write
 (`enabled:false` stores `allowActions:false`, and each field repairs on its own), and the settings
 merge mirrors it. Turning the API off revokes actions, and turning it back on leaves them off. The
@@ -3969,6 +4037,35 @@ For a `queued` or claimed-but-unauthorized row it asks `cancelDesktopInput` and 
 between, the answer is 409 `delivery_unconfirmed`. Any message the app itself would let its user
 cancel under those limits can be cancelled, including one typed in the app and one the app filed.
 It never calls `stopSessionTurn`: an outbox cancel and a native Stop are separate ledgers.
+
+OpenCode jobs run a local task for one conversation and bring the answer back to it. `src/main/opencode.ts`
+owns the registry (process memory, like browser-control's pending claims: a restart is a lost
+listener, and the shutdown sequence's process-cleanup phase kills the running children); `src/shared/local-task.ts`
+owns the textual protocol. A job is created only by the controller's explicit request —
+`POST /v1/opencode/jobs` with `{ sessionId, cwd, task, model }` and an optional caller UUID for
+at-most-once creation (a repeat answers the existing job, a different body under the same id is
+409) — never by parsing a chat message, and no MCP tool can start one. Admission requires the
+session to exist, not be a worker or helper chat and already have a conversation; `cwd` goes
+through `resolvePath` against the approved roots (virtual or native spelling, links refused) and
+must name a folder; the task is plain text (empty, flag-shaped or protocol-carrying text is
+refused); the model is a `provider/model` slug or null for OpenCode's own configured default —
+OpenCode keeps its own credentials and configuration, and this app never handles provider keys.
+The process is spawned argv-only (`run --dir <real> --format json [--model <id>] -- <task>`, flags
+verified against OpenCode 1.18.34) through `prepareCommand`, never a shell. Output is collected
+into the terminal tools' `HeadTailBuffer` (1 MiB per stream); the view clips through one shared
+head/tail helper and the delivered payload fits a 60,000-character budget under the outbox's
+96,000 ceiling, reporting every omitted byte and character. At most four jobs run at once; 64
+terminal jobs stay readable. When a job ends — completed, failed (nonzero exit or spawn error,
+with `exitCode` and `stderr`) or cancelled — one `<COS_LOCAL_RESULT>{...}</COS_LOCAL_RESULT>`
+payload (jobId, status, exitCode, stdout, stderr, omission counts) is delivered to the
+originating session as an after-turn outbox row through `sendDesktopInput`: it never interrupts
+an answer, queues behind a busy chat by the outbox's own rules, and follows the session through a
+Compact & Resume rebind. There is no retry timer; the job records `resultInputId` or a bounded
+`resultError`, and a controller can read the retained output from the job or send it itself
+through `POST /v1/inputs`. The protocol fences hold at both ends: `parseLocalTask` matches only
+`<COS_LOCAL_TASK>` blocks, so a result can never parse as a task, and admission refuses any task
+carrying either marker, so neither a result echoed into a new job nor a nested task can start
+work. The browser extension parses none of this.
 
 Disconnect immediately publishes `disconnecting` and coalesces repeated clicks into one
 transition. MCP drain protects only complete requests admitted to the adapter: idle TCP,

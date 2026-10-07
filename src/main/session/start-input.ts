@@ -73,12 +73,12 @@ async function startAcceptedInput(entry: InputEntry, controller: AbortController
     if (starting.get(entry.id) === controller) starting.delete(entry.id);
   }
 }
-export async function sendDesktopInput(input: InputArgs): Promise<InputEntry> {
+export async function sendDesktopInput(input: InputArgs, waitFor?: { conversationId: string; turnId: string }): Promise<InputEntry> {
   if (stopped) throw new Error('The app is shutting down');
-  if (input.mode === 'finish' || starting.has(input.id)) return enqueueInput(input);
+  if (input.mode === 'finish' || starting.has(input.id)) return enqueueInput(input, undefined, waitFor);
   const controller = new AbortController(); starting.set(input.id, controller);
   try {
-    const entry = await enqueueInput(input);
+    const entry = await enqueueInput(input, undefined, waitFor);
     if (controller.signal.aborted) { await cancelInput(input.id); controller.signal.throwIfAborted(); }
     if (entry.state !== 'queued' || entry.transportIntent === 'tool' || entry.attachmentDelivery === 'tool') {
       starting.delete(input.id); return entry;

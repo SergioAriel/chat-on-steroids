@@ -109,6 +109,11 @@ export interface CallContext {
    * still running and reports it on its own tick, which is usually after the answer.
    */
   bindOnAttribution?: string;
+  /**
+   * The transport a first-class local caller named, when this call is not an MCP request.
+   * Absent for every ordinary and nested call: attribution then reads exactly as before.
+   */
+  transport?: 'core_bridge';
 }
 
 const storage = new AsyncLocalStorage<CallContext>();

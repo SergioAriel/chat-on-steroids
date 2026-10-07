@@ -481,7 +481,10 @@ export function transportIdentityStatus(): { checked: boolean; present: boolean 
   return { ...transportIdentity };
 }
 
-function noteTransportIdentity(transportKey: string | null): void {
+function noteTransportIdentity(transportKey: string | null, seed?: LocalCallSeed): void {
+  // A first-class local call carries no MCP transport session, and must not answer the
+  // Activity question "did the MCP transport ever supply a session id" for the endpoint.
+  if (seed) return;
   if (transportIdentity.checked) return;
   transportIdentity = { checked: true, present: transportKey !== null };
   logInfo(
@@ -619,6 +622,20 @@ function withInbox(
  * `agents` tool the terminal call is an *action* rather than a tool name, and the
  * re-offer rule has to follow the action.
  */
+/**
+ * A first-class local caller: an in-process invocation whose session and conversation the
+ * caller already proved itself, such as the Core Bridge executing a chat's textual request.
+ *
+ * The seed is the authority for who is calling — the ingress request-id join belongs to the
+ * MCP transport and has nothing to answer here — and `transport` names the transport on the
+ * recorded call so a local execution is never filed as an MCP request.
+ */
+export interface LocalCallSeed {
+  conversationId: string | null;
+  sessionId: string | null;
+  transport: 'core_bridge';
+}
+
 export async function dispatch(
   name: string,
   args: unknown,
@@ -627,7 +644,8 @@ export async function dispatch(
   surface: SurfaceId,
   run: () => Promise<ToolResult>,
   parent?: CallContext,
-  setupProfileId: string | null = null
+  setupProfileId: string | null = null,
+  seed?: LocalCallSeed
 ): Promise<ToolResult> {
   // The context is built here, one layer out from where the work happens, because the
   // compaction barrier asks about the whole request and not just the handler. A call is
@@ -640,11 +658,12 @@ export async function dispatch(
     startedAt: Date.now(),
     activity: summarizeRunningCall(name, args, emptyEvidence()),
     transportKey,
+    ...(seed ? { transport: seed.transport } : {}),
     agent: null,
     allowUnattributed: getConfig().multiAgent.allowUnattributedCalls,
     caller: parent
       ? { ...parent.caller }
-      : { transportKey, requestId, conversationId: null, sessionId: null, setupProfileId },
+      : { transportKey, requestId, conversationId: seed?.conversationId ?? null, sessionId: seed?.sessionId ?? null, setupProfileId },
     outcome: null,
     evidence: emptyEvidence()
   };
@@ -652,7 +671,7 @@ export async function dispatch(
   setRequestOwner(requestOwner);
   try {
     const result = await trackMcpRequest(() =>
-      trackInFlight(context, () => dispatchTracked(context, name, args, transportKey, requestId, surface, run, !!parent))
+      trackInFlight(context, () => dispatchTracked(context, name, args, transportKey, requestId, surface, run, !!parent, seed))
     );
     // In-process callers have no socket; resolving their outer invocation publishes it.
     if (!parent && !inboundPublication()) context.publication!.completedAt = Date.now();
@@ -685,15 +704,19 @@ async function dispatchTracked(
   requestId: string | null,
   surface: SurfaceId,
   run: () => Promise<ToolResult>,
-  nested: boolean
+  nested: boolean,
+  seed?: LocalCallSeed
 ): Promise<ToolResult> {
-  noteTransportIdentity(transportKey);
+  noteTransportIdentity(transportKey, seed);
   const markTiming = beginToolTiming();
   // Recorded here rather than in `guard` because only this layer knows which server
   // answered, and "was this connector ever actually used from ChatGPT" is a per-connector
-  // question the setup screen has to answer honestly.
-  surfaceToolCallAt.set(surface, Date.now());
-  noteConnectorUse(surface, 'tool');
+  // question the setup screen has to answer honestly. A seeded local call is not transport
+  // traffic at all: it counts as neither tunnel proof nor ChatGPT using the connector.
+  if (!seed) {
+    surfaceToolCallAt.set(surface, Date.now());
+    noteConnectorUse(surface, 'tool');
+  }
   const isFinish = isFinishCall(name, args);
   const startedAt = context.startedAt;
   const allowUnattributed = context.allowUnattributed === true;
@@ -701,7 +724,9 @@ async function dispatchTracked(
   // request id, identity-sensitive handlers (workspace/session/agents) see it before they
   // touch state. If the page is one tick late this stays null; only handlers that actually
   // require identity wait for their own exact mate. Ordinary absolute reads/execs never wait.
-  if (!nested) setCallerConversation(context, callerConversation(name, startedAt, requestId));
+  // A seeded local caller already owns its conversation: the request-id join has nothing to
+  // answer for it, and looking anyway could only overwrite the proof with a weaker guess.
+  if (!nested && !seed) setCallerConversation(context, callerConversation(name, startedAt, requestId));
   await reconcileAgentRequestOwners().catch(error => {
     logWarn(`Worker ownership recovery deferred: ${error instanceof Error ? error.message : String(error)}`);
   });
@@ -1143,6 +1168,7 @@ async function dispatchTracked(
     args: surface === 'plugins' ? pluginManager.redact(args) : args,
     content: delivered.content,
     ...(surface === 'plugins' ? { protocolResult: delivered } : {}),
+    ...(context.transport ? { transport: context.transport } : {}),
     // guard() already marks unexpected defects; an unclassified isError is an expected rejection.
     outcome: context.outcome ?? (result.isError ? 'tool_rejected' : 'ok'),
     durationMs,
@@ -1405,6 +1431,12 @@ export interface SurfaceRegistrar {
   registered(): string[];
   /** Same registered handler/schema, with a fresh child recording context and inherited proof. */
   invokeNested(name: string, args: unknown, parent: CallContext): Promise<ToolResult>;
+  /**
+   * Same registered handler/schema for a first-class local caller: a top-level dispatch whose
+   * conversation and session the caller itself proved, not an MCP request and never nested.
+   * Every dispatcher guard — block, compaction, lifecycle, capabilities, recording — applies.
+   */
+  invokeLocal(name: string, args: unknown, seed: LocalCallSeed): Promise<ToolResult>;
   descriptions(): Array<{ name: string; description: string }>;
 }
 
@@ -1439,6 +1471,15 @@ export function createRegistrar(server: McpServer | null, ctx: ToolContext, surf
         const entry = handlers.get(name);
         return entry ? entry.run(args) : fail('UNKNOWN_TOOL: this tool is not available on this connector.');
       }, parent);
+    },
+    invokeLocal(name, args, seed) {
+      // Not nested and no transport session: the seed is the whole caller, so the dispatcher's
+      // block/compaction/lifecycle checks run against the exact conversation the local caller
+      // proved, and the recorded call carries the transport it was given.
+      return dispatch(name, args, null, null, surface, async () => {
+        const entry = handlers.get(name);
+        return entry ? entry.run(args) : fail('UNKNOWN_TOOL: this tool is not available on this connector.');
+      }, undefined, ctx.setupProfileId ?? null, seed);
     },
     register(name, config, handler) {
       names.push(name);

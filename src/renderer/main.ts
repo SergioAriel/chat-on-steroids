@@ -696,6 +696,7 @@ function save(over: { readOnly?: boolean; theme?: 'light' | 'dark'; appearance?:
       appearance: over.appearance ?? previous.ui.appearance
     },
     controlApi: { enabled: $<HTMLInputElement>('controlApiEnabled').checked, allowActions: $<HTMLInputElement>('controlApiAllowActions').checked },
+    coreBridge: { enabled: $<HTMLInputElement>('coreBridgeEnabled').checked, allowActions: $<HTMLInputElement>('coreBridgeAllowActions').checked },
     ...chatPatch
   };
   requestedSettings = patch;
@@ -730,6 +731,7 @@ async function saveSnapshot(patch: SettingsPatch, previous: AppState['config']):
     compaction: previous.compaction,
     mcp: previous.mcp ?? { instructions: '' },
     controlApi: previous.controlApi ?? { enabled: false, allowActions: false },
+    coreBridge: previous.coreBridge ?? { enabled: false, allowActions: false },
     multiAgent: previous.multiAgent,
     goal: previous.goal
   };
@@ -760,6 +762,14 @@ async function saveSnapshot(patch: SettingsPatch, previous: AppState['config']):
     }
     if (state && (!requestedSettings || requestedSettings.controlApi?.enabled === patch.controlApi?.enabled)) {
       $<HTMLInputElement>('controlApiEnabled').checked = state.config.controlApi?.enabled === true;
+    }
+    // The same protection for the bridge pair: a box that stayed ticked after a failed save
+    // must not re-send its value with the next unrelated save.
+    if (state && (!requestedSettings || requestedSettings.coreBridge?.allowActions === patch.coreBridge?.allowActions)) {
+      $<HTMLInputElement>('coreBridgeAllowActions').checked = state.config.coreBridge?.allowActions === true;
+    }
+    if (state && (!requestedSettings || requestedSettings.coreBridge?.enabled === patch.coreBridge?.enabled)) {
+      $<HTMLInputElement>('coreBridgeEnabled').checked = state.config.coreBridge?.enabled === true;
     }
   }
 }
@@ -1501,6 +1511,10 @@ function apply(next: AppState): void {
   applyChecked($<HTMLInputElement>('controlApiAllowActions'), config.controlApi?.allowActions === true, previousState?.config.controlApi?.allowActions);
   // Actions need the API itself, so the switch stays off and disabled until it is on.
   $<HTMLInputElement>('controlApiAllowActions').disabled = config.controlApi?.enabled !== true;
+  applyChecked($<HTMLInputElement>('coreBridgeEnabled'), config.coreBridge?.enabled === true, previousState?.config.coreBridge?.enabled);
+  applyChecked($<HTMLInputElement>('coreBridgeAllowActions'), config.coreBridge?.allowActions === true, previousState?.config.coreBridge?.allowActions);
+  // Bridge actions need the bridge itself, on the same rule as the control API pair.
+  $<HTMLInputElement>('coreBridgeAllowActions').disabled = config.coreBridge?.enabled !== true;
   applyChecked(
     $<HTMLInputElement>('minimizeToTray'),
     config.ui.minimizeToTray,
@@ -2441,6 +2455,8 @@ for (const id of [
   'mentionCore',
   'controlApiEnabled',
   'controlApiAllowActions',
+  'coreBridgeEnabled',
+  'coreBridgeAllowActions',
   'privacyScreenshots',
   'tunnelKind',
   'tunnelId',

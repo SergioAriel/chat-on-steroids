@@ -177,7 +177,8 @@ export type CallAttribution =
   | 'turn'
   | 'agent'
   | 'generation'
-  | 'inferred';
+  | 'inferred'
+  | 'core_bridge';
 
 /**
  * What each grade of attribution actually rests on, in the words shown to the user.
@@ -205,7 +206,8 @@ export const ATTRIBUTION_LABELS: Record<CallAttribution, string> = {
   agent: 'agent key',
   turn: 'tool block on the page',
   generation: 'the only chat generating',
-  inferred: 'not placed in a chat'
+  inferred: 'not placed in a chat',
+  core_bridge: 'the local Core bridge'
 };
 
 export interface ToolCallRecord {
@@ -224,7 +226,7 @@ export interface ToolCallRecord {
   /** Conversation proven by that request id, or null when ownership was unresolved. */
   conversationId: string | null;
   /** Deterministic placement outcome for current, unresolved, or deliberately retired callers. */
-  attributionMethod: 'request_id' | 'unattributed' | 'superseded';
+  attributionMethod: 'request_id' | 'unattributed' | 'superseded' | 'core_bridge';
   /** Exact arguments as JSON. Cut inline past the cap, with the whole text in an asset. */
   args: StoredText;
   result: StoredText;

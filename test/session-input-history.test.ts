@@ -2,9 +2,10 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { appendEvent, createSession, getSession, initSessionStore, observeSessionModel, readEvents, resetSessionStoreForTests, upsertMessageEvent, upsertNativeImageEvent, writeAsset } from '../src/main/session/store.js';
-import { recordDeliveredInput, recordedInputImage } from '../src/main/session/input-history.js';
+import { recordDeliveredInput, recordedInputImage, sessionHasCoreBridgeBootstrap } from '../src/main/session/input-history.js';
 import type { InputEntry } from '../src/main/session/input.js';
 import { chronological } from '../src/shared/chronology.js';
 import * as store from '../src/main/session/store.js';
@@ -209,6 +210,31 @@ it.each([true, false])('merges a native echo before=%s with the receipt and pres
   const stranger = await writeAsset(other.id, bytes, 'image/webp');
   expect(unreferenced.id).toBe(stranger.id);
   expect(await recordedInputImage(other.id, stranger.id)).toBeNull();
+});
+
+it('recognizes Core Bridge bootstrap only from a confirmed valid hidden frame', async () => {
+  const { prependUserPrompt } = await import('../src/shared/user-prompt.js');
+  const { CORE_BRIDGE_INSTRUCTIONS } = await import('../src/shared/core-bridge.js');
+
+  const literal = await createSession({ conversationId: 'literal-bootstrap', title: 'Literal marker' });
+  await recordDeliveredInput({ id: randomUUID(), sessionId: literal.id, state: 'sent', owner: 'page',
+    text: `Quoted [[COS_CONTEXT:20]] ${CORE_BRIDGE_INSTRUCTIONS}`, mode: 'auto', dueAt: 0, createdAt: 1,
+    conversationId: 'literal-bootstrap', messageId: 'literal-native', deliveredAt: 2 } as InputEntry);
+  expect(await sessionHasCoreBridgeBootstrap(literal.id)).toBe(false);
+
+  const skillOnly = await createSession({ conversationId: 'skill-only-bootstrap', title: 'Skill only' });
+  const skillFrame = prependUserPrompt('Use selected skill', '# Selected Skill\nDo only the selected skill instructions.');
+  await recordDeliveredInput({ id: randomUUID(), sessionId: skillOnly.id, state: 'sent', owner: 'page',
+    text: 'Use selected skill', deliveryText: skillFrame, mode: 'auto', dueAt: 0, createdAt: 3,
+    conversationId: 'skill-only-bootstrap', messageId: 'skill-native', deliveredAt: 4 } as InputEntry);
+  expect(await sessionHasCoreBridgeBootstrap(skillOnly.id)).toBe(false);
+
+  const bridged = await createSession({ conversationId: 'real-bootstrap', title: 'Real bootstrap' });
+  const bridgeFrame = prependUserPrompt('Inspect files', `Core instructions\n\n${CORE_BRIDGE_INSTRUCTIONS}`);
+  await recordDeliveredInput({ id: randomUUID(), sessionId: bridged.id, state: 'sent', owner: 'page',
+    text: 'Inspect files', deliveryText: bridgeFrame, mode: 'auto', dueAt: 0, createdAt: 5,
+    conversationId: 'real-bootstrap', messageId: 'bridge-native', deliveredAt: 6 } as InputEntry);
+  expect(await sessionHasCoreBridgeBootstrap(bridged.id)).toBe(true);
 });
 
 it('does not publish a queued intent or an unresolved fresh-session receipt', async () => {

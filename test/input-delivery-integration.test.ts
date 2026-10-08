@@ -1489,6 +1489,26 @@ const message = (sessionId: string | null, automation: 'off' | 'goal' | 'loop') 
   id: randomUUID(), sessionId, automation, text: 'Complete this request', mode: 'auto', dueAt: Date.now(), model: null, reasoningEffort: null
 });
 
+it('bootstraps an adopted ChatGPT session exactly once before ordinary follow-ups', async () => {
+  const conversationId = randomUUID();
+  const session = await createSession({ title: 'Adopted chat', conversationId });
+  const base = defaultConfig();
+  await saveConfig({ ...base, coreBridge: { ...base.coreBridge, enabled: true } });
+
+  const first = await input.enqueueInput({ ...message(session.id, 'off'), mode: 'auto' as const, text: 'Inspect the local workspace' });
+  const firstClaim = await input.claimBrowserInput(first.id, 'adopted-page-1', conversationId, true);
+  expect(firstClaim?.deliveryText).toContain('[[COS_CONTEXT:');
+  expect(firstClaim?.deliveryText).toContain('Local Core Bridge is available');
+  expect(userPromptText(firstClaim?.deliveryText ?? '')).toBe('Inspect the local workspace');
+  expect(await input.authorizeBrowserInput(first.id, 'adopted-page-1', conversationId)).toBe(true);
+  expect(await input.acknowledgeBrowserInput(first.id, 'adopted-page-1', conversationId, randomUUID())).toBe(true);
+
+  const second = await input.enqueueInput({ ...message(session.id, 'off'), mode: 'auto' as const, text: 'Inspect one more file' });
+  const secondClaim = await input.claimBrowserInput(second.id, 'adopted-page-2', conversationId, true);
+  expect(secondClaim?.deliveryText).toBe('Inspect one more file');
+  expect(secondClaim?.deliveryText).not.toContain('Local Core Bridge is available');
+});
+
 it('bounds an explicit next-tool delivery to four recorded images', async () => {
   const { default: sharp } = await import('sharp');
   const conversationId = randomUUID();

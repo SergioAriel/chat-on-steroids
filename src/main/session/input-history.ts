@@ -6,6 +6,24 @@ import { validateInputImages } from './input-images.js';
 import sharp from 'sharp';
 import { positionOf } from '../../shared/chronology.js';
 import { notifyChanged } from './recorder.js';
+import { CORE_BRIDGE_INSTRUCTIONS } from '../../shared/core-bridge.js';
+import { userPromptInstructions } from '../../shared/user-prompt.js';
+
+const coreBridgeBootstrappedSessions = new Set<string>();
+
+function hasCoreBridgeSetup(text: string): boolean {
+  return userPromptInstructions(text)?.includes(CORE_BRIDGE_INSTRUCTIONS) === true;
+}
+
+/** Durable proof that this local session has already taught ChatGPT the fallback protocol. */
+export async function sessionHasCoreBridgeBootstrap(sessionId: string): Promise<boolean> {
+  if (coreBridgeBootstrappedSessions.has(sessionId)) return true;
+  const events = await readEvents(sessionId, { kinds: ['user_message'] });
+  const found = events.some(event => event.kind === 'user_message' &&
+    event.inputDelivery === 'confirmed' && !!event.inputId && hasCoreBridgeSetup(event.message.text));
+  if (found) coreBridgeBootstrappedSessions.add(sessionId);
+  return found;
+}
 
 /** Project a tool handout or proven delivery into history, never the enqueue intent. */
 export async function recordDeliveredInput(entry: Readonly<InputEntry>, anchorCommitted?: (seq: number) => void): Promise<boolean> {
@@ -43,6 +61,7 @@ export async function recordDeliveredInput(entry: Readonly<InputEntry>, anchorCo
   // Delivery and its chronology do not depend on optional preview storage. This
   // stable row survives a quota failure; retry only enriches the same origin.
   const committed = await upsertMessageEvent(sessionId, message);
+  if (confirmed && hasCoreBridgeSetup(text)) coreBridgeBootstrappedSessions.add(sessionId);
   anchorCommitted?.(positionOf(committed.event));
   // Offered → confirmed revises this row in place; count and time cannot reveal it.
   notifyChanged(sessionId);

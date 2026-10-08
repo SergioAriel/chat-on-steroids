@@ -27,23 +27,38 @@ function asTyped(text: string): string {
   return text.replace(/\\\n/g, '\n').replace(/\\([!-/:-@[-`{-~])/g, '$1').replace(/(^|\n)&#x20;/g, '$1 ');
 }
 
-function readFrame(text: string): string | null {
+interface PromptFrame {
+  authored: string;
+  instructions: string;
+}
+
+function readFrame(text: string): PromptFrame | null {
   const identity = continuation(text);
   const header = /^\[\[COS_CONTEXT:(\d{1,6})\]\]\n/.exec(text.slice(identity.length));
   if (!header) return null;
-  const end = identity.length + header[0].length + Number(header[1]);
+  const start = identity.length + header[0].length;
+  const end = start + Number(header[1]);
   const boundary = '\n[[/COS_CONTEXT]]\n\n';
-  return text.startsWith(boundary, end) ? identity + text.slice(end + boundary.length) : null;
+  return text.startsWith(boundary, end) ? {
+    authored: identity + text.slice(end + boundary.length),
+    instructions: text.slice(start, end)
+  } : null;
 }
 
-export function userPromptText(text: string): string | null {
+function promptFrame(text: string): PromptFrame | null {
   text = text.replace(/\r\n?/g, '\n');
-  // Exact first: authored text that happens to contain a backslash keeps it, and only a frame
-  // that cannot be read as sent is read as one the page escaped.
   const exact = readFrame(text);
   if (exact !== null) return exact;
   const typed = asTyped(text);
   return typed === text ? null : readFrame(typed);
+}
+
+export function userPromptText(text: string): string | null {
+  return promptFrame(text)?.authored ?? null;
+}
+
+export function userPromptInstructions(text: string): string | null {
+  return promptFrame(text)?.instructions ?? null;
 }
 
 export function prependUserPrompt(text: string, instructions: string): string {

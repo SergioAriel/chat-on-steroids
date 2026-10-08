@@ -21,7 +21,7 @@ import { releaseSessionFinish, requestSessionFinishGoal } from './session/finish
 import { GOAL_MARKER_INSTRUCTION } from '../shared/goal-templates.js';
 import { validateInputImages } from './session/input-images.js';
 import { stageInputAttachment, stageInputAttachments, type AttachmentSource } from './session/input-attachments.js';
-import { recordDeliveredInput, recordedInputImage } from './session/input-history.js';
+import { recordDeliveredInput, recordedInputImage, sessionHasCoreBridgeBootstrap } from './session/input-history.js';
 import { UI_BASE_ZOOM, titleBarOverlayForTheme, windowBackgroundForTheme } from './window-layout.js';
 import { usageOverview } from './session/usage.js';
 import { inputArgs, listInputs, editQueuedInput, reorderQueuedInputs, setInputAutomation, configureInputDelivery, pausedBrowserHelpers, cancelFinishInputs } from './session/input.js';
@@ -1654,9 +1654,15 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       const mode = entry.automation ?? (control.enabled ? control.mode : 'off');
       const text = mode === 'goal' && goalBackendFor('goal') === 'templates' && !entry.text.includes(GOAL_MARKER_INSTRUCTION)
         ? entry.text + GOAL_MARKER_INSTRUCTION : entry.text;
-      // Only the opening user input owns executor setup. Existing chats, queued
-      // checkpoints and automatic continuations already have their instructions.
-      return (entry.opening || !entry.sessionId) && !entry.conversationId && !entry.finishOwner && entry.mode !== 'finish'
+      // A CoS-created chat gets setup from its reserved opening. A conversation first discovered
+      // on the ChatGPT page already has a conversationId but no CoS opening; teach that local
+      // session the fallback exactly once, proven by its own confirmed durable history.
+      const openingOwnsSetup = (entry.opening || !entry.sessionId) && !entry.conversationId &&
+        !entry.finishOwner && entry.mode !== 'finish';
+      const adoptedSessionNeedsBridge = getConfig().coreBridge.enabled === true && !!entry.sessionId &&
+        !!entry.conversationId && !entry.finishOwner && entry.mode !== 'finish' && entry.purpose !== 'decision' &&
+        !(await sessionHasCoreBridgeBootstrap(entry.sessionId));
+      return openingOwnsSetup || adoptedSessionNeedsBridge
         ? prepareSessionPrompt(text, entry, limits, authored)
         : !entry.finishOwner && entry.purpose !== 'decision' ? prepareSkillFollowup(text, authored, limits, entry) : text;
     },

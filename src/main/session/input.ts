@@ -1828,6 +1828,24 @@ export function failBrowserInput(id: string, owner: string, error: string, detai
       decisionWaiters.delete(id);
       return true;
     }
+    // Generated after-turn results (Core Bridge, etc.) that hit an unsent user draft should
+    // re-queue and wait for the composer to clear, rather than failing permanently.
+    const isUnsentDraftError = /unsent draft/i.test(error);
+    const isGeneratedAfterTurn = entry.mode === 'after-turn' && entry.authoredSource !== 'text' && !entry.recovery && !entry.companionInputId;
+    if (isUnsentDraftError && isGeneratedAfterTurn) {
+      logInfo(`input ${entry.id}: re-queuing generated after-turn result due to unsent user draft`);
+      const requeued: InputEntry = {
+        ...entry,
+        state: 'queued',
+        owner: null,
+        offeredAt: undefined,
+        requiresAuthorization: undefined,
+        error: undefined,
+        // Preserve deliveryText, queuedTurn, completedTurnId and other frozen fields
+      };
+      await commit(current.map(row => sameDelivery(entry, row) ? requeued : row));
+      return true;
+    }
     if (entry.recovery && entry.requiresAuthorization === true && entry.sendAuthorizedAt === undefined) {
       // Said once per reason, not once per attempt: the pickup schedule can hand the same ticket to
       // the same page every few seconds, and an unbounded log is its own kind of silence.

@@ -37,7 +37,7 @@ vi.mock('../src/main/session/store.js', () => ({
     origin: { kind: binding.origin }, lastToolCallAt: binding.lastToolCallAt,
     finishTurn: { turnId: binding.activeTurnId, released: binding.finishReleased },
     selectedModel: { conversationId: id === 'session-two' ? 'conversation-b' : binding.conversationId, model: binding.model } })),
-  findSessionByConversation: vi.fn(async (id: string) => [...openings.values()].find(row => row.conversationId === id) ?? (binding.recorded && id === binding.conversationId ? { id: 'session-one', conversationId: id } : null))
+  findSessionByConversation: vi.fn(async (id: string) => [...openings.values()].find(row => row.conversationId === id) ?? (binding.recorded && id === binding.conversationId ? { id: 'session-one', conversationId: id } : null)),
 }));
 vi.mock('../src/main/config.js', () => ({ getConfig: () => ({
   ui: { finishTool: binding.finishEnabled, finishAction: 'goal', finishLeadMinutes: binding.leadMinutes },
@@ -1059,6 +1059,67 @@ describe('durable user input ownership', () => {
     expect(result.length).toBeGreaterThan(0);
     expect(Buffer.byteLength(result.map(row => row.text).join(''))).toBeLessThanOrEqual(128000);
     expect((await listInputs()).some(row => row.state === 'queued')).toBe(true);
+  });
+  it('re-queues generated after-turn results that hit an unsent user draft', async () => {
+    // Simulate a Core Bridge result: generated after-turn entry with authoredSource !== 'text'
+    // The entry needs a queuedTurn that matches the mocked turn end for eligibleStageEnd to succeed
+    const generatedEntry = await enqueueInput(input({
+      sessionId,
+      mode: 'after-turn',
+      authoredSource: 'none',
+      text: '<COS_CORE_RESULT>{"id":"test","status":"completed","results":[]}</COS_CORE_RESULT>',
+    }));
+    // Manually set queuedTurn to match the mocked turn end
+    const current = await listInputs();
+    const entry = current.find(r => r.id === generatedEntry.id);
+    if (entry) {
+      entry.queuedTurn = { conversationId: binding.conversationId, turnId: 'previous-turn' };
+      const { writeDurableNow } = await import('../src/main/durable.js');
+      await writeDurableNow('session-input', current);
+      resetInputForTests();
+    }
+    const claimed = await claimBrowserInput(generatedEntry.id, 'doc', binding.conversationId);
+    expect(claimed).not.toBeNull();
+    // Fail with the exact unsent draft error message from content.js
+    expect(await failBrowserInput(generatedEntry.id, 'doc', 'ChatGPT already contains an unsent draft. Send or clear that draft in Chrome before trying again.')).toBe(true);
+    // The entry should be re-queued, not failed
+    const rows = await listInputs();
+    const requeued = rows.find(r => r.id === generatedEntry.id);
+    expect(requeued).toBeDefined();
+    expect(requeued!.state).toBe('queued');
+    expect(requeued!.owner).toBeNull();
+    expect(requeued!.error).toBeUndefined();
+    expect(requeued!.deliveryText).toBeDefined(); // frozen delivery text preserved
+    expect(requeued!.offeredAt).toBeUndefined();
+    expect(requeued!.requiresAuthorization).toBeUndefined();
+    // It should be eligible for browser pickup again
+    const pending = await pendingBrowserInputs();
+    expect(pending.some(p => p.id === generatedEntry.id)).toBe(true);
+  });
+it('does not re-queue user-authored after-turn entries on unsent draft', async () => {
+    // User-authored after-turn entry (authoredSource: 'text')
+    const userEntry = await enqueueInput(input({
+      sessionId,
+      mode: 'after-turn',
+      authoredSource: 'text',
+      text: 'User follow-up'
+    }));
+    // Manually set queuedTurn to match the mocked turn end
+    const current1 = await listInputs();
+    const entry1 = current1.find(r => r.id === userEntry.id);
+    if (entry1) {
+      entry1.queuedTurn = { conversationId: binding.conversationId, turnId: 'previous-turn' };
+      const { writeDurableNow } = await import('../src/main/durable.js');
+      await writeDurableNow('session-input', current1);
+      resetInputForTests();
+    }
+    await claimBrowserInput(userEntry.id, 'doc2', binding.conversationId);
+    expect(await failBrowserInput(userEntry.id, 'doc2', 'ChatGPT already contains an unsent draft. Send or clear that draft in Chrome before trying again.')).toBe(true);
+    const rows = await listInputs();
+    const failed = rows.find(r => r.id === userEntry.id);
+    expect(failed).toBeDefined();
+    expect(failed!.state).toBe('failed');
+    expect(failed!.error).toContain('unsent draft');
   });
 });
 
